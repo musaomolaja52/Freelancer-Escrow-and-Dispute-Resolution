@@ -267,3 +267,90 @@
 (define-read-only (get-dispute-counter)
   (var-get dispute-counter)
 )
+
+(define-map freelancer-reputation
+  principal
+  {
+    total-jobs: uint,
+    completed-jobs: uint,
+    total-rating: uint,
+    rating-count: uint,
+    last-updated: uint
+  }
+)
+
+(define-public (rate-freelancer (job-id uint) (rating uint))
+  (let ((job-data (unwrap! (map-get? jobs job-id) ERR-INVALID-JOB)))
+    (asserts! (is-eq tx-sender (get client job-data)) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get state job-data) JOB-STATE-RESOLVED) ERR-INVALID-STATE)
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-AMOUNT)
+    (let 
+      (
+        (freelancer (get freelancer job-data))
+        (current-rep (default-to 
+          { total-jobs: u0, completed-jobs: u0, total-rating: u0, rating-count: u0, last-updated: u0 }
+          (map-get? freelancer-reputation freelancer)
+        ))
+        (current-time (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE))
+      )
+      (map-set freelancer-reputation freelancer
+        {
+          total-jobs: (get total-jobs current-rep),
+          completed-jobs: (get completed-jobs current-rep),
+          total-rating: (+ (get total-rating current-rep) rating),
+          rating-count: (+ (get rating-count current-rep) u1),
+          last-updated: current-time
+        }
+      )
+      (ok true)
+    )
+  )
+)
+
+(define-private (update-freelancer-stats (freelancer principal) (completed bool))
+  (let 
+    (
+      (current-rep (default-to 
+        { total-jobs: u0, completed-jobs: u0, total-rating: u0, rating-count: u0, last-updated: u0 }
+        (map-get? freelancer-reputation freelancer)
+      ))
+      (current-time (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE))
+    )
+    (map-set freelancer-reputation freelancer
+      {
+        total-jobs: (+ (get total-jobs current-rep) u1),
+        completed-jobs: (if completed (+ (get completed-jobs current-rep) u1) (get completed-jobs current-rep)),
+        total-rating: (get total-rating current-rep),
+        rating-count: (get rating-count current-rep),
+        last-updated: current-time
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-freelancer-reputation (freelancer principal))
+  (map-get? freelancer-reputation freelancer)
+)
+
+(define-read-only (get-freelancer-completion-rate (freelancer principal))
+  (let ((rep (map-get? freelancer-reputation freelancer)))
+    (match rep
+      rep-data (if (> (get total-jobs rep-data) u0)
+                 (some (/ (* (get completed-jobs rep-data) u100) (get total-jobs rep-data)))
+                 (some u0))
+      none
+    )
+  )
+)
+
+(define-read-only (get-freelancer-average-rating (freelancer principal))
+  (let ((rep (map-get? freelancer-reputation freelancer)))
+    (match rep
+      rep-data (if (> (get rating-count rep-data) u0)
+                 (some (/ (get total-rating rep-data) (get rating-count rep-data)))
+                 none)
+      none
+    )
+  )
+)
