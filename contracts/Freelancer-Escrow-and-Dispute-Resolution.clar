@@ -22,6 +22,13 @@
 (define-data-var job-counter uint u0)
 (define-data-var dispute-counter uint u0)
 
+(define-constant MILESTONE-STATE-PENDING u0)
+(define-constant MILESTONE-STATE-FUNDED u1)
+(define-constant MILESTONE-STATE-COMPLETED u2)
+(define-constant MILESTONE-STATE-APPROVED u3)
+
+(define-data-var milestone-counter uint u0)
+
 (define-map jobs
   uint
   {
@@ -353,4 +360,102 @@
       none
     )
   )
+)
+
+
+
+(define-map milestones
+  uint
+  {
+    job-id: uint,
+    title: (string-ascii 100),
+    amount: uint,
+    deadline: uint,
+    state: uint,
+    created-at: uint
+  }
+)
+
+(define-map job-milestones
+  uint
+  { milestone-ids: (list 20 uint), total-milestones: uint }
+)
+
+(define-public (create-milestone (job-id uint) (title (string-ascii 100)) (amount uint) (deadline uint))
+  (let 
+    (
+      (job-data (unwrap! (map-get? jobs job-id) ERR-INVALID-JOB))
+      (milestone-id (+ (var-get milestone-counter) u1))
+      (current-milestones (default-to { milestone-ids: (list), total-milestones: u0 } (map-get? job-milestones job-id)))
+    )
+    (asserts! (is-eq tx-sender (get client job-data)) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get state job-data) JOB-STATE-CREATED) ERR-INVALID-STATE)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (< (len (get milestone-ids current-milestones)) u20) ERR-INVALID-STATE)
+    (var-set milestone-counter milestone-id)
+    (map-set milestones milestone-id
+      {
+        job-id: job-id,
+        title: title,
+        amount: amount,
+        deadline: deadline,
+        state: MILESTONE-STATE-PENDING,
+        created-at: (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE)
+      }
+    )
+    (map-set job-milestones job-id
+      {
+        milestone-ids: (unwrap! (as-max-len? (append (get milestone-ids current-milestones) milestone-id) u20) ERR-INVALID-STATE),
+        total-milestones: (+ (get total-milestones current-milestones) u1)
+      }
+    )
+    (ok milestone-id)
+  )
+)
+
+(define-public (fund-milestone (milestone-id uint))
+  (let ((milestone-data (unwrap! (map-get? milestones milestone-id) ERR-INVALID-JOB)))
+    (asserts! (is-eq (get state milestone-data) MILESTONE-STATE-PENDING) ERR-INVALID-STATE)
+    (let ((job-data (unwrap! (map-get? jobs (get job-id milestone-data)) ERR-INVALID-JOB)))
+      (asserts! (is-eq tx-sender (get client job-data)) ERR-UNAUTHORIZED)
+      (try! (stx-transfer? (get amount milestone-data) tx-sender (as-contract tx-sender)))
+      (map-set milestones milestone-id (merge milestone-data { state: MILESTONE-STATE-FUNDED }))
+      (ok true)
+    )
+  )
+)
+
+(define-public (complete-milestone (milestone-id uint))
+  (let ((milestone-data (unwrap! (map-get? milestones milestone-id) ERR-INVALID-JOB)))
+    (asserts! (is-eq (get state milestone-data) MILESTONE-STATE-FUNDED) ERR-INVALID-STATE)
+    (let ((job-data (unwrap! (map-get? jobs (get job-id milestone-data)) ERR-INVALID-JOB)))
+      (asserts! (is-eq tx-sender (get freelancer job-data)) ERR-UNAUTHORIZED)
+      (map-set milestones milestone-id (merge milestone-data { state: MILESTONE-STATE-COMPLETED }))
+      (ok true)
+    )
+  )
+)
+
+(define-public (approve-milestone (milestone-id uint))
+  (let ((milestone-data (unwrap! (map-get? milestones milestone-id) ERR-INVALID-JOB)))
+    (asserts! (is-eq (get state milestone-data) MILESTONE-STATE-COMPLETED) ERR-INVALID-STATE)
+    (let ((job-data (unwrap! (map-get? jobs (get job-id milestone-data)) ERR-INVALID-JOB)))
+      (asserts! (is-eq tx-sender (get client job-data)) ERR-UNAUTHORIZED)
+      (try! (as-contract (stx-transfer? (get amount milestone-data) tx-sender (get freelancer job-data))))
+      (map-set milestones milestone-id (merge milestone-data { state: MILESTONE-STATE-APPROVED }))
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (get-milestone (milestone-id uint))
+  (map-get? milestones milestone-id)
+)
+
+(define-read-only (get-job-milestones (job-id uint))
+  (map-get? job-milestones job-id)
+)
+
+(define-read-only (get-milestone-counter)
+  (var-get milestone-counter)
 )
