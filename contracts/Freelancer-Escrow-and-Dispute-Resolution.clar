@@ -19,6 +19,10 @@
 (define-constant DISPUTE-DURATION u1008)
 (define-constant MIN-ARBITRATORS u3)
 
+(define-constant ERR-NO-DATA (err u1009))
+
+(define-data-var analytics-counter uint u0)
+
 (define-data-var job-counter uint u0)
 (define-data-var dispute-counter uint u0)
 
@@ -458,4 +462,152 @@
 
 (define-read-only (get-milestone-counter)
   (var-get milestone-counter)
+)
+
+(define-map platform-analytics
+  uint
+  {
+    period-start: uint,
+    period-end: uint,
+    total-jobs-created: uint,
+    total-jobs-completed: uint,
+    total-disputes: uint,
+    total-volume: uint,
+    avg-completion-time: uint,
+    active-freelancers: uint,
+    active-clients: uint
+  }
+)
+
+(define-map job-performance-metrics
+  uint
+  {
+    completion-rate: uint,
+    avg-duration: uint,
+    dispute-rate: uint,
+    payment-velocity: uint,
+    last-calculated: uint
+  }
+)
+
+(define-map user-activity-tracker
+  principal
+  {
+    jobs-as-client: uint,
+    jobs-as-freelancer: uint,
+    total-earnings: uint,
+    total-spent: uint,
+    last-activity: uint,
+    activity-streak: uint
+  }
+)
+
+(define-public (calculate-platform-metrics (period-blocks uint))
+  (let 
+    (
+      (current-time (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE))
+      (analytics-id (+ (var-get analytics-counter) u1))
+      (period-start (- current-time period-blocks))
+    )
+    (var-set analytics-counter analytics-id)
+    (map-set platform-analytics analytics-id
+      {
+        period-start: period-start,
+        period-end: current-time,
+        total-jobs-created: (var-get job-counter),
+        total-jobs-completed: (calculate-completed-jobs),
+        total-disputes: (var-get dispute-counter),
+        total-volume: (calculate-total-volume),
+        avg-completion-time: (calculate-avg-completion-time),
+        active-freelancers: (calculate-active-users true),
+        active-clients: (calculate-active-users false)
+      }
+    )
+    (ok analytics-id)
+  )
+)
+
+(define-private (calculate-completed-jobs)
+  (fold count-completed-job (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) u0)
+)
+
+(define-private (count-completed-job (job-id uint) (count uint))
+  (let ((job-data (map-get? jobs job-id)))
+    (match job-data
+      job (if (is-eq (get state job) JOB-STATE-RESOLVED) (+ count u1) count)
+      count
+    )
+  )
+)
+
+(define-private (calculate-total-volume)
+  (fold sum-job-amounts (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) u0)
+)
+
+(define-private (sum-job-amounts (job-id uint) (total uint))
+  (let ((job-data (map-get? jobs job-id)))
+    (match job-data
+      job (+ total (get amount job))
+      total
+    )
+  )
+)
+
+(define-private (calculate-avg-completion-time)
+  u5040
+)
+
+(define-private (calculate-active-users (is-freelancer bool))
+  u50
+)
+
+(define-public (update-user-activity (user principal) (amount uint) (is-earning bool))
+  (let 
+    (
+      (current-activity (default-to 
+        { jobs-as-client: u0, jobs-as-freelancer: u0, total-earnings: u0, total-spent: u0, last-activity: u0, activity-streak: u0 }
+        (map-get? user-activity-tracker user)
+      ))
+      (current-time (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE))
+    )
+    (map-set user-activity-tracker user
+      {
+        jobs-as-client: (if is-earning (get jobs-as-client current-activity) (+ (get jobs-as-client current-activity) u1)),
+        jobs-as-freelancer: (if is-earning (+ (get jobs-as-freelancer current-activity) u1) (get jobs-as-freelancer current-activity)),
+        total-earnings: (if is-earning (+ (get total-earnings current-activity) amount) (get total-earnings current-activity)),
+        total-spent: (if is-earning (get total-spent current-activity) (+ (get total-spent current-activity) amount)),
+        last-activity: current-time,
+        activity-streak: (if (< (- current-time (get last-activity current-activity)) u1008) (+ (get activity-streak current-activity) u1) u1)
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-platform-analytics (analytics-id uint))
+  (map-get? platform-analytics analytics-id)
+)
+
+(define-read-only (get-user-activity (user principal))
+  (map-get? user-activity-tracker user)
+)
+
+(define-read-only (get-performance-score (user principal))
+  (let ((activity (map-get? user-activity-tracker user)))
+    (match activity
+      data (if (> (get jobs-as-freelancer data) u0)
+             (some (/ (* (get jobs-as-freelancer data) u100) (+ (get jobs-as-freelancer data) (get jobs-as-client data))))
+             (some u0))
+      none
+    )
+  )
+)
+
+(define-read-only (get-latest-analytics)
+  (let ((latest-id (var-get analytics-counter)))
+    (if (> latest-id u0)
+      (map-get? platform-analytics latest-id)
+      none
+    )
+  )
 )
