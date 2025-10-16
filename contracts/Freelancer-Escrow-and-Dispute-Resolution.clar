@@ -31,6 +31,17 @@
 (define-constant MILESTONE-STATE-COMPLETED u2)
 (define-constant MILESTONE-STATE-APPROVED u3)
 
+(define-constant ERR-RECURRING-INVALID (err u1010))
+(define-constant ERR-RECURRING-NOT-DUE (err u1011))
+(define-constant ERR-RECURRING-EXHAUSTED (err u1012))
+
+(define-constant RECURRING-STATE-ACTIVE u0)
+(define-constant RECURRING-STATE-PAUSED u1)
+(define-constant RECURRING-STATE-CANCELLED u2)
+(define-constant RECURRING-STATE-COMPLETED u3)
+
+(define-data-var recurring-counter uint u0)
+
 (define-data-var milestone-counter uint u0)
 
 (define-map jobs
@@ -610,4 +621,91 @@
       none
     )
   )
+)
+
+(define-map recurring-jobs
+  uint
+  {
+    client: principal,
+    freelancer: principal,
+    amount-per-cycle: uint,
+    total-cycles: uint,
+    completed-cycles: uint,
+    interval-blocks: uint,
+    state: uint,
+    created-at: uint,
+    last-payment-at: uint,
+    next-payment-due: uint
+  }
+)
+
+(define-public (create-recurring-job (freelancer principal) (amount-per-cycle uint) (total-cycles uint) (interval-blocks uint))
+  (let ((recurring-id (+ (var-get recurring-counter) u1)))
+    (asserts! (> amount-per-cycle u0) ERR-INVALID-AMOUNT)
+    (asserts! (> total-cycles u0) ERR-RECURRING-INVALID)
+    (asserts! (> interval-blocks u0) ERR-RECURRING-INVALID)
+    (var-set recurring-counter recurring-id)
+    (map-set recurring-jobs recurring-id
+      {
+        client: tx-sender,
+        freelancer: freelancer,
+        amount-per-cycle: amount-per-cycle,
+        total-cycles: total-cycles,
+        completed-cycles: u0,
+        interval-blocks: interval-blocks,
+        state: RECURRING-STATE-ACTIVE,
+        created-at: stacks-block-height,
+        last-payment-at: u0,
+        next-payment-due: (+ stacks-block-height interval-blocks)
+      }
+    )
+    (ok recurring-id)
+  )
+)
+
+(define-public (fund-recurring-job (recurring-id uint))
+  (let ((recurring-data (unwrap! (map-get? recurring-jobs recurring-id) ERR-RECURRING-INVALID)))
+    (asserts! (is-eq tx-sender (get client recurring-data)) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get completed-cycles recurring-data) u0) ERR-INVALID-STATE)
+    (try! (stx-transfer? (* (get amount-per-cycle recurring-data) (get total-cycles recurring-data)) tx-sender (as-contract tx-sender)))
+    (ok true)
+  )
+)
+
+(define-public (release-recurring-payment (recurring-id uint))
+  (let ((recurring-data (unwrap! (map-get? recurring-jobs recurring-id) ERR-RECURRING-INVALID)))
+    (asserts! (is-eq (get state recurring-data) RECURRING-STATE-ACTIVE) ERR-INVALID-STATE)
+    (asserts! (>= stacks-block-height (get next-payment-due recurring-data)) ERR-RECURRING-NOT-DUE)
+    (asserts! (< (get completed-cycles recurring-data) (get total-cycles recurring-data)) ERR-RECURRING-EXHAUSTED)
+    (try! (as-contract (stx-transfer? (get amount-per-cycle recurring-data) tx-sender (get freelancer recurring-data))))
+    (map-set recurring-jobs recurring-id (merge recurring-data
+      {
+        completed-cycles: (+ (get completed-cycles recurring-data) u1),
+        last-payment-at: stacks-block-height,
+        next-payment-due: (+ stacks-block-height (get interval-blocks recurring-data)),
+        state: (if (is-eq (+ (get completed-cycles recurring-data) u1) (get total-cycles recurring-data)) RECURRING-STATE-COMPLETED (get state recurring-data))
+      }
+    ))
+    (ok true)
+  )
+)
+
+(define-public (cancel-recurring-job (recurring-id uint))
+  (let ((recurring-data (unwrap! (map-get? recurring-jobs recurring-id) ERR-RECURRING-INVALID)))
+    (asserts! (is-eq tx-sender (get client recurring-data)) ERR-UNAUTHORIZED)
+    (asserts! (< (get completed-cycles recurring-data) (get total-cycles recurring-data)) ERR-RECURRING-EXHAUSTED)
+    (let ((remaining-cycles (- (get total-cycles recurring-data) (get completed-cycles recurring-data))))
+      (try! (as-contract (stx-transfer? (* (get amount-per-cycle recurring-data) remaining-cycles) tx-sender (get client recurring-data))))
+      (map-set recurring-jobs recurring-id (merge recurring-data { state: RECURRING-STATE-CANCELLED }))
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (get-recurring-job (recurring-id uint))
+  (map-get? recurring-jobs recurring-id)
+)
+
+(define-read-only (get-recurring-counter)
+  (var-get recurring-counter)
 )
