@@ -40,6 +40,16 @@
 (define-constant RECURRING-STATE-CANCELLED u2)
 (define-constant RECURRING-STATE-COMPLETED u3)
 
+(define-constant BONUS-STATE-PENDING u0)
+(define-constant BONUS-STATE-LOCKED u1)
+(define-constant BONUS-STATE-CLAIMED u2)
+(define-constant BONUS-STATE-REFUNDED u3)
+
+(define-constant ERR-BONUS-EXISTS (err u2001))
+(define-constant ERR-BONUS-INVALID (err u2002))
+(define-constant ERR-BONUS-NOT-ELIGIBLE (err u2003))
+(define-constant ERR-BONUS-ALREADY-CLAIMED (err u2004))
+
 (define-data-var recurring-counter uint u0)
 
 (define-data-var milestone-counter uint u0)
@@ -708,4 +718,131 @@
 
 (define-read-only (get-recurring-counter)
   (var-get recurring-counter)
+)
+
+
+(define-map job-bonus-pools
+  uint
+  {
+    total-amount: uint,
+    tier-1-threshold: uint,
+    tier-1-payout: uint,
+    tier-2-threshold: uint,
+    tier-2-payout: uint,
+    tier-3-threshold: uint,
+    tier-3-payout: uint,
+    state: uint,
+    created-at: uint
+  }
+)
+
+(define-map bonus-claims
+  uint
+  {
+    claimed-by: principal,
+    amount-claimed: uint,
+    completion-time: uint,
+    claimed-at: uint
+  }
+)
+
+(define-public (create-bonus-pool 
+  (job-id uint) 
+  (total-amount uint)
+  (tier-1-hours uint) 
+  (tier-1-payout uint)
+  (tier-2-hours uint) 
+  (tier-2-payout uint)
+  (tier-3-hours uint) 
+  (tier-3-payout uint))
+  (let 
+    (
+      (job-data (unwrap! (map-get? jobs job-id) ERR-INVALID-JOB))
+      (current-time (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE))
+    )
+    (asserts! (is-eq tx-sender (get client job-data)) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get state job-data) JOB-STATE-CREATED) ERR-INVALID-STATE)
+    (asserts! (is-none (map-get? job-bonus-pools job-id)) ERR-BONUS-EXISTS)
+    (asserts! (>= total-amount (+ tier-1-payout (+ tier-2-payout tier-3-payout))) ERR-BONUS-INVALID)
+    (try! (stx-transfer? total-amount tx-sender (as-contract tx-sender)))
+    (map-set job-bonus-pools job-id
+      {
+        total-amount: total-amount,
+        tier-1-threshold: tier-1-hours,
+        tier-1-payout: tier-1-payout,
+        tier-2-threshold: tier-2-hours,
+        tier-2-payout: tier-2-payout,
+        tier-3-threshold: tier-3-hours,
+        tier-3-payout: tier-3-payout,
+        state: BONUS-STATE-LOCKED,
+        created-at: current-time
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (claim-early-bonus (job-id uint))
+  (let 
+    (
+      (job-data (unwrap! (map-get? jobs job-id) ERR-INVALID-JOB))
+      (bonus-pool (unwrap! (map-get? job-bonus-pools job-id) ERR-BONUS-INVALID))
+      (completion-time (- (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE) (get created-at job-data)))
+      (bonus-amount (unwrap! (get-applicable-bonus-tier job-id completion-time) ERR-BONUS-NOT-ELIGIBLE))
+    )
+    (asserts! (is-eq tx-sender (get freelancer job-data)) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get state job-data) JOB-STATE-RESOLVED) ERR-INVALID-STATE)
+    (asserts! (is-eq (get state bonus-pool) BONUS-STATE-LOCKED) ERR-INVALID-STATE)
+    (asserts! (is-none (map-get? bonus-claims job-id)) ERR-BONUS-ALREADY-CLAIMED)
+    (try! (as-contract (stx-transfer? bonus-amount tx-sender (get freelancer job-data))))
+    (map-set bonus-claims job-id
+      {
+        claimed-by: tx-sender,
+        amount-claimed: bonus-amount,
+        completion-time: completion-time,
+        claimed-at: (unwrap! (get-stacks-block-info? time (- stacks-block-height u1)) ERR-INVALID-STATE)
+      }
+    )
+    (map-set job-bonus-pools job-id (merge bonus-pool { state: BONUS-STATE-CLAIMED }))
+    (ok bonus-amount)
+  )
+)
+
+(define-read-only (get-applicable-bonus-tier (job-id uint) (completion-time-seconds uint))
+  (let ((bonus-pool (unwrap! (map-get? job-bonus-pools job-id) ERR-BONUS-INVALID)))
+    (if (<= completion-time-seconds (get tier-1-threshold bonus-pool))
+      (ok (get tier-1-payout bonus-pool))
+      (if (<= completion-time-seconds (get tier-2-threshold bonus-pool))
+        (ok (get tier-2-payout bonus-pool))
+        (if (<= completion-time-seconds (get tier-3-threshold bonus-pool))
+          (ok (get tier-3-payout bonus-pool))
+          ERR-BONUS-NOT-ELIGIBLE
+        )
+      )
+    )
+  )
+)
+
+(define-public (refund-bonus-pool (job-id uint))
+  (let 
+    (
+      (job-data (unwrap! (map-get? jobs job-id) ERR-INVALID-JOB))
+      (bonus-pool (unwrap! (map-get? job-bonus-pools job-id) ERR-BONUS-INVALID))
+    )
+    (asserts! (is-eq tx-sender (get client job-data)) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get state bonus-pool) BONUS-STATE-LOCKED) ERR-INVALID-STATE)
+    (asserts! (or (is-eq (get state job-data) JOB-STATE-CANCELLED) (is-eq (get state job-data) JOB-STATE-RESOLVED)) ERR-INVALID-STATE)
+    (asserts! (is-none (map-get? bonus-claims job-id)) ERR-BONUS-ALREADY-CLAIMED)
+    (try! (as-contract (stx-transfer? (get total-amount bonus-pool) tx-sender (get client job-data))))
+    (map-set job-bonus-pools job-id (merge bonus-pool { state: BONUS-STATE-REFUNDED }))
+    (ok true)
+  )
+)
+
+(define-read-only (get-bonus-pool (job-id uint))
+  (map-get? job-bonus-pools job-id)
+)
+
+(define-read-only (get-bonus-claim (job-id uint))
+  (map-get? bonus-claims job-id)
 )
